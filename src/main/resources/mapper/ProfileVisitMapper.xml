@@ -24,4 +24,10 @@
           AND visited_at &lt;= #{end}
     </select>
 
+    <select id="findRecentVisitorIds" resultType="long">
+        SELECT DISTINCT visitor_id
+        FROM profile_visits
+        WHERE visited_at &gt;= #{since}
+    </select>
+
 </mapper>
