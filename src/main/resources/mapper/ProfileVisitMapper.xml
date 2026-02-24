@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.meet5.social.mapper.ProfileVisitMapper">
+
+    <resultMap id="profileVisitMap" type="com.meet5.social.model.ProfileVisit">
+        <id property="id" column="id"/>
+        <result property="visitorId" column="visitor_id"/>
+        <result property="visitedId" column="visited_id"/>
+        <result property="visitedAt" column="visited_at"/>
+    </resultMap>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO profile_visits (visitor_id, visited_id, visited_at)
+        VALUES (#{visitorId}, #{visitedId}, #{visitedAt})
+    </insert>
+
+    <select id="countVisitsInTimeWindow" resultType="long">
+        SELECT COUNT(DISTINCT visited_id)
+        FROM profile_visits
+        WHERE visitor_id = #{visitorId}
+          AND visited_at &gt;= #{start}
+          AND visited_at &lt;= #{end}
+    </select>
+
+</mapper>

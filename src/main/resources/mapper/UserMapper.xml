@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.meet5.social.mapper.UserMapper">
+
+    <resultMap id="userProfileMap" type="com.meet5.social.model.UserProfile">
+        <id property="id" column="id"/>
+        <result property="username" column="username"/>
+        <result property="name" column="name"/>
+        <result property="age" column="age"/>
+        <result property="profileDescription" column="profile_description"/>
+        <result property="relationshipStatus" column="relationship_status"/>
+        <result property="profilePicture1" column="profile_picture1"/>
+        <result property="profilePicture2" column="profile_picture2"/>
+        <result property="profilePicture3" column="profile_picture3"/>
+        <result property="profilePicture4" column="profile_picture4"/>
+    </resultMap>
+
+    <select id="findProfileById" resultMap="userProfileMap">
+        SELECT id, username, name, age, profile_description, relationship_status,
+               profile_picture1, profile_picture2, profile_picture3, profile_picture4
+        FROM users
+        WHERE id = #{userId}
+    </select>
+    <select id="isFraud" resultType="boolean">
+        SELECT is_fraud FROM users WHERE id = #{userId}
+    </select>
+
+</mapper>

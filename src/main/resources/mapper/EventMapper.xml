@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.meet5.social.mapper.EventMapper">
+
+    <insert id="batchInsert" parameterType="java.util.List">
+        INSERT INTO events (event_time, location, description, organizer_id)
+        VALUES
+        <foreach collection="list" item="item" separator="," batchSize="1000">
+            (#{item.eventTime}, #{item.location}, #{item.description}, #{item.organizerId})
+        </foreach>
+    </insert>
+
+</mapper>

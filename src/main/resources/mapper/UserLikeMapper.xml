@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.meet5.social.mapper.UserLikeMapper">
+
+    <resultMap id="userLikeMap" type="com.meet5.social.model.UserLike">
+        <id property="id" column="id"/>
+        <result property="likerId" column="liker_id"/>
+        <result property="likedId" column="liked_id"/>
+        <result property="likedAt" column="liked_at"/>
+    </resultMap>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO user_likes (liker_id, liked_id, liked_at)
+        VALUES (#{likerId}, #{likedId}, #{likedAt})
+    </insert>
+
+    <select id="findLikedIdsByLikerId" resultType="long">
+        SELECT liked_id
+        FROM user_likes
+        WHERE liker_id = #{likerId}
+        ORDER BY liked_at DESC
+    </select>
+
+    <select id="exists" resultType="boolean">
+        SELECT COUNT(1) > 0
+        FROM user_likes
+        WHERE liker_id = #{likerId}
+          AND liked_id = #{likedId}
+    </select>
+
+    <delete id="delete">
+        DELETE FROM user_likes
+        WHERE liker_id = #{likerId}
+          AND liked_id = #{likedId}
+    </delete>
+
+    <select id="countLikesInTimeWindow" resultType="long">
+        SELECT COUNT(DISTINCT liked_id)
+        FROM user_likes
+        WHERE liker_id = #{likerId}
+          AND liked_at &gt;= #{start}
+          AND liked_at &lt;= #{end}
+    </select>
+
+</mapper>
