@@ -1,6 +1,7 @@
 package com.meet5.social.mapper;
 
 import com.meet5.social.model.ProfileVisit;
+import com.meet5.social.model.VisitorInfo;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 
@@ -18,4 +19,6 @@ public interface ProfileVisitMapper {
             @Param("end") LocalDateTime end);
 
     List<Long> findRecentVisitorIds(@Param("since") LocalDateTime since);
+
+    List<VisitorInfo> findVisitorsByUserId(@Param("visitedId") Long visitedId);
 }

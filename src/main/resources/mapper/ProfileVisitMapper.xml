@@ -30,4 +30,21 @@
         WHERE visited_at &gt;= #{since}
     </select>
 
+    <resultMap id="visitorInfoMap" type="com.meet5.social.model.VisitorInfo">
+        <id property="id" column="id"/>
+        <result property="username" column="username"/>
+        <result property="name" column="name"/>
+        <result property="age" column="age"/>
+        <result property="visitTime" column="visit_time"/>
+    </resultMap>
+
+    <select id="findVisitorsByUserId" resultMap="visitorInfoMap">
+        SELECT
+            u.id, u.username, u.name, u.age, pv.visited_at AS visit_time
+        FROM users u
+        INNER JOIN profile_visits pv ON u.id = pv.visitor_id
+        WHERE pv.visited_id = #{visitedId}
+        ORDER BY pv.visited_at DESC
+    </select>
+
 </mapper>

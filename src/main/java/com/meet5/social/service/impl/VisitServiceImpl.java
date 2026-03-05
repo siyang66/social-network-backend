@@ -7,11 +7,14 @@ import com.meet5.social.mapper.UserMapper;
 import com.meet5.social.model.ProfileVisit;
 import com.meet5.social.model.UserProfile;
 import com.meet5.social.model.VisitResult;
+import com.meet5.social.model.VisitorInfo;
 import com.meet5.social.service.FraudDetectionService;
 import com.meet5.social.service.VisitService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
 
 @Slf4j
 @Service
@@ -41,5 +44,11 @@ public class VisitServiceImpl implements VisitService {
         UserProfile profile = userMapper.findProfileById(visitedId);
         if (profile == null) throw new UserNotFoundException(visitedId);
         return new VisitResult(visit, profile);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<VisitorInfo> getVisitors(Long userId) {
+        return profileVisitMapper.findVisitorsByUserId(userId);
     }
 }

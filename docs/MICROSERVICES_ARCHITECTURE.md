@@ -1,228 +1,422 @@
-# Microservices Architecture Proposal
+# Meet5 Microservices Architecture Proposal
 
-## Traffic and data analysis
+## Business Context
 
-Baseline assumptions: 5M registered users, active daily users ~10% (500k DAU).
-
-Estimated write traffic:
-- Each active user averages 20 visits + 10 likes per day
-- Visits: 500k × 20 = 10M writes/day → ~115 writes/sec average, peak ~3–5x = 350–575 writes/sec
-- Likes: 500k × 10 = 5M writes/day → ~58 writes/sec average, peak ~175 writes/sec
-- Total write peak: ~750 writes/sec
-
-Estimated read traffic (read:write ratio typically 10:1 for social apps):
-- Profile reads, visitor lists, like lists: ~7,500 reads/sec at peak
-
-Data volume:
-- profile_visits: 10M rows/day → ~3.6B rows/year (requires partitioning by time)
-- user_likes: 5M rows/day → ~1.8B rows/year
-- fraud_records: low volume, negligible
-
-Implications for service split:
-- The visit/like write path is the hottest — Interaction Service needs horizontal scaling independent of User Service
-- Read traffic on visitor/like lists justifies a dedicated Query Service with Redis caching to avoid hammering the DB
-- Fraud detection runs an aggregation query on every write — at 750 writes/sec this becomes a bottleneck; async decoupling via Kafka is necessary at this scale
-- profile_visits will need time-based table partitioning (e.g. monthly) to keep query performance acceptable as rows accumulate
+Meet5 is Germany's leading social dating app for 40+ age group:
+- **3M+ users**, 500k DAU (10% daily active)
+- **50M requests/day** (~580 QPS avg, 1,700-2,900 QPS peak)
+- **Core features**: Events (social meetups), Members (profiles/matching), Chat (messaging), Fraud Detection, Crawler Detection
 
 ---
 
-## Assumptions, Non-goals, and Trade-offs
+## Traffic Analysis
 
-### Assumptions
+### Traffic Distribution (50M req/day)
+| Feature | % | Requests/Day | Peak QPS |
+|---------|---|--------------|----------|
+| Members (profiles, search) | 40% | 20M | 700 |
+| Events (browse, join) | 30% | 15M | 525 |
+| Chat (messages) | 20% | 10M | 350 |
+| Fraud/Crawler checks | 10% | 5M | 180 |
 
-- Seconds-level fraud propagation lag is acceptable; real-time hard blocking is only required on the write path.
-- Each service owns its own database schema; cross-service reads go through APIs or events, not shared tables.
-- The monolith's existing PostgreSQL schema is the starting point — no data migration strategy is covered here.
+### Data Volume (Annual)
+- **messages**: 1B rows/year (needs partitioning)
+- **profile_visits**: 3.6B rows/year (hot write path)
+- **user_likes**: 1.8B rows/year
+- **event_participations**: 50M rows/year
+- **fraud_records**: 100k rows/year
 
-### Non-goals
-
-- No data migration plan from monolith to microservices.
-- No multi-region or active-active setup.
-- Query Service, Notification Service, and Audit Service are listed as future candidates only.
-
-### Trade-offs
-
-**Why 3 core services (User, Interaction, Fraud), not more?**
-Splitting further adds operational overhead before there is evidence of a bottleneck. Start with the minimal split that removes the main pain points, then extract further based on actual load.
-
-**Why hard gate (sync) + event (async) dual-layer for fraud?**
-The sync check (Redis lookup before each write) gives immediate blocking. The async Kafka event handles downstream side effects without blocking the write path. Async-only would leave a window where a fraud user can still write between detection and propagation.
-
-**Why Redis for fraud status?**
-A DB call on every write adds latency and load. Redis gives sub-millisecond reads. The trade-off is eventual consistency — acceptable given the sync detection already runs on the write path.
+### Bottlenecks
+1. Chat messages (1B rows/year) → time-based partitioning needed
+2. Profile visits/likes (5.4B rows/year) → async processing needed
+3. Fraud detection (runs on every interaction) → sync bottleneck at scale
 
 ---
 
-## Failure modes and degradation
+## Why Microservices
 
-### Kafka unavailable
+### Monolith Pain Points
+- **Tight coupling**: fraud detection blocks write path
+- **Cannot scale independently**: chat needs 3x instances of events
+- **Deployment risk**: one bad deploy affects everything
+- **Team bottleneck**: multiple teams on same codebase
 
-- Writes still succeed; downstream consumers drift until Kafka recovers and replays.
-- Mitigation: outbox pattern — write events to a local `outbox` table in the same transaction, relay to Kafka via a separate process.
-
-### Fraud Service unavailable
-
-- Fallback: use last-known Redis value. If Redis also has no entry, fail open and log a warning.
-- Circuit breaker opens after repeated failures; fallback activates automatically.
-
-### Redis unavailable
-
-- Fallback: Interaction Service calls Fraud Service directly (sync HTTP). If that also fails, fail open with a warning log.
-- Read endpoints fall back to DB reads — higher latency but correct.
+### Benefits
+- Independent scaling (chat 3x, events 2x, members 1x)
+- Team autonomy (deploy independently)
+- Technology flexibility (WebSocket for chat, Elasticsearch for events)
+- Fault isolation (chat downtime doesn't affect events)
 
 ---
 
-## Current state
+## Service Architecture
 
-Everything lives in one service: user management, visits, likes, fraud detection, bulk ops. Main pain points at scale:
-- fraud detection runs synchronously on every write, slowing down the API
-- can't scale the read-heavy query layer without scaling everything else
-- one bad deploy can take down the whole thing
+### Service Split (5 Core Services)
 
----
+**Business Services** (domain-driven):
+1. **Events Service**: event CRUD, search (Elasticsearch), join/leave, recommendations
+2. **Members Service**: profile CRUD, matching, discovery, likes, visits
+3. **Chat Service**: real-time messaging (WebSocket), message history
 
-## Proposed split
+**Platform Services** (cross-cutting):
+4. **Fraud Service**: rule engine + ML scoring, consumes events via Kafka, blocks users
+5. **Crawler Detection Service**: rate limiting, bot detection, CAPTCHA
 
-```
-API Gateway (GCP Cloud Endpoints / Apigee)
--- User Service          CRUD users, profiles
--- Interaction Service   visits, likes
--- Fraud Service         detection, scoring, blocking
--- Query Service         read-optimized views, Redis cache (future)
--- Notification Service  alerts, emails (future)
--- Audit Service         logging, compliance (future)
-```
-
-All services publish/consume events via Kafka. The gateway is the only public entry point.
+### Why This Split?
+- **Events + Members + Chat**: different scaling needs, different tech stacks, different teams
+- **Fraud + Crawler**: shared by all services, compute-intensive, scale independently
 
 ---
 
-## Service definitions
+## Data Flow & Event Streaming
 
-### User Service
-
-Owns the `users` table.
-
+### Request Flow
 ```
-POST   /api/v1/users
-GET    /api/v1/users/{id}/profile
-PUT    /api/v1/users/{id}
-DELETE /api/v1/users/{id}
-POST   /api/v1/users/bulk
-```
-
-### Interaction Service
-
-Owns `profile_visits` and `user_likes`. Checks fraud status before each write, then publishes an event.
-
-```
-POST   /api/v1/interactions/visit
-POST   /api/v1/interactions/like
-GET    /api/v1/interactions/visitors/{userId}
-GET    /api/v1/interactions/likes/{userId}
+Users → Load Balancer → API Gateway (Apigee)
+  ├─> Events Service
+  ├─> Members Service
+  └─> Chat Service
+       ↓
+  Check Fraud/Crawler (sync)
+       ↓
+  Write to Cloud SQL + Publish Event to Kafka
+       ↓
+  Fraud Service consumes events (async)
 ```
 
-### Fraud Service
+### Kafka Events
+- `PROFILE_VISITED` → Fraud Service counts visits
+- `PROFILE_LIKED` → Fraud Service counts likes
+- `EVENT_JOINED` → Fraud Service detects rapid joins
+- `MESSAGE_SENT` → Fraud Service detects spam
+- `USER_FRAUD_MARKED` → All services update Redis flags
 
-Runs detection logic, marks users, publishes `USER_FRAUD_MARKED`.
+### Fraud Detection Flow
+1. **Sync check** (before write): Redis lookup for fraud flag → immediate blocking
+2. **Async detection** (after write): Kafka event → Fraud Service aggregates → marks user → publishes `USER_FRAUD_MARKED`
+3. **State propagation**: Services consume `USER_FRAUD_MARKED` → update Redis
 
-```
-GET    /api/v1/fraud/status/{userId}
-POST   /api/v1/fraud/check
-GET    /api/v1/fraud/history/{userId}
-```
-
-Detection rule: 100+ visits AND 100+ likes within 10 minutes. Threshold configurable.
+**Rules**:
+- 100+ visits AND 100+ likes within 10 minutes
+- 10+ event joins within 1 minute
+- 50+ messages within 5 minutes
 
 ---
 
-## API versioning
+## GCP Deployment
 
-URL-based: `/api/v1/`, `/api/v2/`. Breaking changes get a new major version, supported in parallel for 12 months.
+### Tech Stack
+| Component | GCP Service | Purpose |
+|-----------|-------------|---------|
+| Compute | Cloud Run | Auto-scaling, WebSocket support |
+| Database | Cloud SQL (PostgreSQL) | 1 master + 2 read replicas |
+| Cache | Memorystore (Redis) | Fraud flags, session, rate counters |
+| Events | Cloud Pub/Sub | Event streaming |
+| Search | Elasticsearch (GKE) | Event search with geo-location |
+| Gateway | Apigee | Routing, auth, rate limiting |
+| Monitoring | Cloud Monitoring + Logging | Metrics, logs, traces |
 
----
-
-## Circuit breaking
-
-Using Resilience4j on all inter-service calls.
-
-```
-# Example values for demo — tune via load test against actual SLA targets
-failureRateThreshold: 50%
-waitDurationInOpenState: 30s
-permittedNumberOfCallsInHalfOpenState: 3
-slidingWindowSize: 10
-```
-
-Thresholds depend on p99 latency of downstream services and acceptable error budget. Set after profiling, not upfront.
+### Cost Estimate
+- **Current scale** (50M req/day): $3,000-5,000/month
+- **10x scale** (500M req/day): $5,000-8,000/month
 
 ---
 
-## Fraud state propagation
+## Migration Strategy (14 Weeks)
 
-When Fraud Service marks a user, it publishes `USER_FRAUD_MARKED` to Kafka:
+### Strangler Fig Pattern
 
+**Phase 1-2: Preparation** (Week 1-2)
+- Add outbox table to monolith
+- Set up GCP infrastructure (Cloud SQL, Redis, Pub/Sub)
+- Deploy monitoring
+
+**Phase 3-4: Extract Fraud Service** (Week 3-4)
+- Deploy in shadow mode (consumes events, doesn't block)
+- Validate accuracy
+- Canary release: 5% → 100%
+
+**Phase 5-6: Extract Members Service** (Week 5-6)
+- Deploy Members Service
+- Dual-write (monolith + microservice)
+- Canary release: 5% → 100%
+
+**Phase 7-9: Extract Events Service** (Week 7-9)
+- Deploy with Elasticsearch
+- Dual-write
+- Canary release: 5% → 100%
+
+**Phase 10-12: Extract Chat Service** (Week 10-12)
+- Deploy with WebSocket support
+- Migrate active conversations
+- Canary release: 5% → 100%
+
+**Phase 13-14: Cleanup** (Week 13-14)
+- Stop dual-write
+- Archive monolith data
+- Keep rollback switch for 1 month
+
+### Parallel Feature Development
+- **New features**: build in microservices directly
+- **Legacy features**: migrate incrementally
+- **Control**: API Gateway routing + feature flags
+
+---
+
+## Key Metrics
+
+### Service Health
+- Latency: P50, P95, P99 per endpoint
+- Throughput: requests/sec per service
+- Error Rate: 4xx, 5xx per endpoint
+- Availability: 99.9% uptime target
+
+### Business Metrics
+- Event joins/day
+- Messages sent/day
+- Fraud blocks/day
+- Crawler blocks/day
+
+### Infrastructure
+- DB connection pool usage
+- Redis hit rate
+- Pub/Sub lag
+- Cloud Run instances
+
+---
+
+## Summary
+
+**Service Split**: Events, Members, Chat (business) + Fraud, Crawler Detection (platform)
+
+**Event-Driven**: Kafka/Pub/Sub for async communication, Redis for sync fraud checks
+
+**Migration**: 14-week Strangler Fig pattern, shadow mode → canary → full migration
+
+**GCP Stack**: Cloud Run + Cloud SQL + Memorystore + Pub/Sub + Elasticsearch
+
+**Cost**: $3,000-5,000/month for 50M req/day
+
+
+---
+
+## Migration Strategy: Strangler Fig Pattern
+
+### Overview
+Gradually replace monolith functionality with microservices while keeping both running in parallel. No big-bang cutover, zero downtime, instant rollback capability.
+
+### 6-Phase Migration Plan
+
+**Phase 1: Preparation (Week 1-2)**
+- Add outbox table to monolith for event publishing
+- Introduce event contracts (`VISIT_RECORDED`, `LIKE_RECORDED`, `USER_FRAUD_MARKED`)
+- Set up GCP infrastructure (Cloud SQL, Memorystore, Pub/Sub)
+- Deploy monitoring (Cloud Monitoring, Cloud Logging, Cloud Trace)
+
+**Phase 2: Extract Fraud Service (Week 3-4)**
+- Deploy Fraud Service on Cloud Run (shadow mode)
+- Monolith publishes events to Pub/Sub, Fraud Service consumes
+- Fraud Service writes to separate DB, no production impact
+- Compare fraud detection results (monolith vs microservice) for validation
+
+**Phase 3: Canary Fraud Service (Week 5-6)**
+- Route 5% of fraud checks to Fraud Service via API Gateway
+- Monitor error rate, latency, accuracy
+- Gradually increase to 10% → 25% → 50% → 100%
+- Monolith remains as fallback (circuit breaker)
+
+**Phase 4: Extract Interaction Service (Week 7-10)**
+- Deploy Interaction Service on Cloud Run
+- Implement dual-write: write to both monolith and Interaction Service
+- Run reconciliation job to compare data consistency
+- Route 5% read traffic to Interaction Service, gradually increase
+
+**Phase 5: Switch Primary Traffic (Week 11-12)**
+- Once metrics stable (error rate < 0.1%, P99 < 200ms), switch primary writes to Interaction Service
+- Monolith becomes read-only backup
+- Keep dual-write for 2 weeks for safety
+
+**Phase 6: Decommission Monolith Modules (Week 13-14)**
+- Stop dual-write, Interaction Service is single source of truth
+- Archive monolith interaction tables
+- Keep rollback switch for 1 month
+
+### Parallel Feature Development Strategy
+
+**Strangler Fig Approach**:
+1. **New features**: build directly in microservices (no monolith code)
+2. **Legacy features**: migrate incrementally using phases above
+3. **Shared features**: use API Gateway routing + feature flags
+
+**Example: Adding "Super Like" Feature**
+- Build in Interaction Service (new endpoint `/api/v1/interactions/super-like`)
+- API Gateway routes `/super-like` to microservice only
+- No monolith changes needed
+- Deploy independently, rollback independently
+
+**Traffic Control Mechanisms**:
+- **API Gateway Routing**: URL-based routing (`/api/v1/*` → monolith, `/api/v2/*` → microservices)
+- **Feature Flags**: enable/disable features per user cohort (use Cloud Firestore or Redis)
+- **Weighted Routing**: percentage-based traffic split (Cloud Endpoints supports natively)
+
+---
+
+## Failure Modes and Degradation
+
+### Pub/Sub Unavailable
+- **Impact**: events not published, downstream consumers lag
+- **Mitigation**: outbox pattern (write events to local DB, relay via separate process)
+- **Fallback**: writes succeed, events replayed when Pub/Sub recovers
+
+### Fraud Service Unavailable
+- **Impact**: cannot check fraud status
+- **Mitigation**: circuit breaker opens after 50% failure rate
+- **Fallback**: use last-known Redis value → if Redis empty, fail-open with warning log
+
+### Redis Unavailable
+- **Impact**: fraud checks slow, cache misses
+- **Mitigation**: fallback to Fraud Service HTTP call (sync)
+- **Fallback**: if Fraud Service also down, fail-open (allow writes, log alert)
+
+### Cloud SQL Unavailable
+- **Impact**: writes fail, reads fail
+- **Mitigation**: read replicas for reads, circuit breaker for writes
+- **Fallback**: return 503, retry with exponential backoff
+
+---
+
+## State Propagation and Consistency
+
+### Fraud State Propagation
+**Event**: `USER_FRAUD_MARKED`
 ```json
 {
   "eventType": "USER_FRAUD_MARKED",
   "userId": 12345,
-  "timestamp": "2026-02-23T10:00:00Z",
+  "timestamp": "2026-03-05T10:00:00Z",
   "reason": "100+ visits and likes within 10 minutes",
-  "metadata": { "visitCount": 150, "likeCount": 120, "timeWindowMinutes": 10 }
+  "metadata": { "visitCount": 150, "likeCount": 120 }
 }
 ```
 
-Consumers:
-- Interaction Service — sets blocked flag in Redis
-- Query Service — invalidates cache
-- Notification Service — sends alert
+**Consumers**:
+- Interaction Service → update Redis flag (hard gate for future writes)
+- Query Service → invalidate cache
+- Notification Service → send alert
 
-Consistency: Interaction Service checks Redis before each write (hard gate, sync). Kafka consumers update local state async. Event lag depends on consumer throughput and partition count; seconds-level lag is assumed acceptable. In production, monitor consumer lag and alert if it exceeds the agreed SLA threshold.
+**Consistency Model**:
+- **Strong consistency**: sync Redis check before each write (immediate blocking)
+- **Eventual consistency**: Kafka consumers update local state (seconds-level lag acceptable)
+- **Monitoring**: alert if consumer lag > 5 seconds
 
----
-
-## Visit action flow
-
-1. API Gateway — auth + rate limit
-2. Interaction Service checks fraud status from Redis (fallback: Fraud Service HTTP)
-3. Records the visit
-4. Publishes `VisitRecorded` to Kafka
-5. Query Service and Audit Service consume independently
-
----
-
-## Fraud detection flow
-
-1. `VisitRecorded` / `LikeRecorded` event triggers Fraud Service
-2. Queries visit + like counts in the time window
-3. If threshold exceeded — marks user, publishes `USER_FRAUD_MARKED`
-4. Interaction Service sets blocked flag in Redis
-5. Notification Service sends alert
+### Data Consistency Guarantees
+1. **Within Service**: ACID transactions via Cloud SQL
+2. **Across Services**: eventual consistency via events + idempotent consumers
+3. **Critical State**: Redis as shared state store (fraud flags, rate limit counters)
+4. **Reconciliation**: daily batch job compares monolith vs microservice data
 
 ---
 
-## Canary release and traffic splitting
+## Tech Stack Summary
 
-Gradual traffic splitting at the gateway level allows migrating from monolith to microservices without a hard cutover. A small percentage of traffic is routed to the new service first; if metrics are stable, the percentage increases incrementally until the new service handles 100% of traffic. At any point, routing can be shifted back to the monolith instantly without data migration.
-
-GCP Cloud Endpoints / Apigee supports weighted routing natively; Istio can handle splitting at the service mesh level without application changes.
-
----
-
-## Tech stack
-
-- API Gateway: GCP Cloud Endpoints / Apigee
-- Service mesh: Kubernetes + Istio
-- Message broker: Apache Kafka
-- Database: PostgreSQL (with time-based partitioning for high-volume tables)
-- Cache: Redis
-- Circuit breaker: Resilience4j
-- Service discovery: GCP Cloud DNS / Istio service registry
-- Logging: GCP Cloud Logging + ELK
-- Monitoring: Prometheus + Grafana / GCP Cloud Monitoring
+| Component | GCP Service | Purpose |
+|-----------|-------------|---------|
+| API Gateway | Cloud Endpoints / Apigee | routing, auth, rate limiting |
+| Compute | Cloud Run / App Engine | stateless services, auto-scaling |
+| Database | Cloud SQL (PostgreSQL) | transactional data, read replicas |
+| Cache | Memorystore (Redis) | fraud flags, hot data |
+| Message Broker | Cloud Pub/Sub | event streaming |
+| Monitoring | Cloud Monitoring | metrics, alerts |
+| Logging | Cloud Logging | centralized logs |
+| Tracing | Cloud Trace | distributed tracing |
+| Secret Management | Secret Manager | API keys, DB credentials |
 
 ---
 
-## Deployment
+## Deployment and Release Strategy
 
-Blue-green: deploy to green, run smoke tests, switch traffic, monitor, rollback if needed. Combined with canary release for gradual migration from monolith.
+### Blue-Green Deployment
+1. Deploy new version to "green" environment
+2. Run smoke tests (health checks, integration tests)
+3. Switch Cloud Load Balancer to green
+4. Monitor for 30 minutes (error rate, latency, throughput)
+5. If issues detected → instant rollback to blue
+6. If stable → decommission blue after 24 hours
+
+### Canary Release (for migration)
+1. Route 5% traffic to new service via API Gateway
+2. Monitor metrics (error rate < 0.1%, P99 < 200ms)
+3. If stable → increase to 10% → 25% → 50% → 100%
+4. Each step runs for 24-48 hours
+5. Rollback at any step if metrics degrade
+
+### Feature Flags
+- Use Cloud Firestore or Redis for flag storage
+- Enable features per user cohort (e.g., 10% beta users)
+- Kill switch for instant disable without deployment
+
+---
+
+## Observability and Monitoring
+
+### Key Metrics
+- **Latency**: P50, P95, P99 per endpoint
+- **Throughput**: requests/sec per service
+- **Error Rate**: 4xx, 5xx per endpoint
+- **Consumer Lag**: Pub/Sub subscription delay
+- **Circuit Breaker State**: open/closed/half-open
+- **Cache Hit Rate**: Redis hit/miss ratio
+
+### Alerts
+- P99 latency > 200ms for 5 minutes → page on-call
+- Error rate > 1% for 5 minutes → page on-call
+- Consumer lag > 10 seconds → warning
+- Circuit breaker open > 1 minute → warning
+- Cloud SQL connection pool > 80% → warning
+
+### Distributed Tracing
+- Use Cloud Trace to track requests across services
+- Trace ID propagated via HTTP headers (`X-Cloud-Trace-Context`)
+- Identify bottlenecks (slow DB queries, high latency services)
+
+---
+
+## Cost Estimation (Rough)
+
+**Assumptions**: 50M requests/day, 500k DAU
+
+| Service | GCP Component | Monthly Cost (USD) |
+|---------|---------------|-------------------|
+| Compute | Cloud Run (3 services) | $300-500 |
+| Database | Cloud SQL (1 master + 2 replicas) | $500-800 |
+| Cache | Memorystore (Redis 5GB) | $150-200 |
+| Message Broker | Cloud Pub/Sub | $100-150 |
+| Load Balancer | Cloud Load Balancer | $50-100 |
+| Monitoring | Cloud Monitoring + Logging | $100-200 |
+| **Total** | | **$1,200-2,000/month** |
+
+**Scaling to 500M requests/day (10x)**: ~$5,000-8,000/month (mostly DB + compute)
+
+---
+
+## Summary
+
+**Migration Timeline**: 14 weeks (3.5 months) for core split
+
+**Key Benefits**:
+- Independent scaling (Interaction Service can scale without User Service)
+- Async fraud detection (removes bottleneck from write path)
+- Zero downtime migration (Strangler Fig + canary release)
+- Parallel feature development (new features in microservices, legacy in monolith)
+
+**Risk Mitigation**:
+- Dual-write + reconciliation (data consistency)
+- Circuit breakers + fallbacks (graceful degradation)
+- Canary release (gradual rollout, instant rollback)
+- Monitoring + alerts (early detection of issues)
+
+**Next Steps**:
+1. Set up GCP project + infrastructure
+2. Implement outbox pattern in monolith
+3. Deploy Fraud Service in shadow mode
+4. Run load tests to validate performance assumptions

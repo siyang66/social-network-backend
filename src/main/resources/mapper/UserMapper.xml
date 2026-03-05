@@ -27,4 +27,13 @@
         SELECT is_fraud FROM users WHERE id = #{userId}
     </select>
 
+    <insert id="batchInsert">
+        INSERT INTO users (username, email, name, age, profile_description, relationship_status,
+                          profile_picture1, profile_picture2, profile_picture3, profile_picture4, is_fraud)
+        VALUES
+        <foreach collection="users" item="user" separator=",">
+            (#{user.username}, #{user.email}, #{user.name}, #{user.age}, null, null, null, null, null, null, #{user.isFraud})
+        </foreach>
+    </insert>
+
 </mapper>

@@ -75,4 +75,12 @@ public class UserController {
         }
         return ResponseEntity.status(503).body(Result.serviceUnavailable());
     }
+
+    // Get all visitors of the authenticated user, sorted by most recent first
+    @GetMapping("/visitors")
+    public ResponseEntity<Result<java.util.List<com.meet5.social.model.VisitorInfo>>> getMyVisitors(
+            @AuthenticationPrincipal Long userId) {
+        java.util.List<com.meet5.social.model.VisitorInfo> visitors = visitService.getVisitors(userId);
+        return ResponseEntity.ok(Result.ok(visitors));
+    }
 }

@@ -68,6 +68,21 @@ public class UserServiceImpl implements UserService {
 
     @Override
     @Transactional
+    public void bulkInsertUsers(List<User> users) {
+        if (users == null || users.isEmpty()) {
+            log.warn("bulkInsertUsers called with empty list");
+            return;
+        }
+        // Validate all users before inserting
+        for (User user : users) {
+            user.validate();
+        }
+        log.info("Bulk inserting {} users", users.size());
+        userMapper.batchInsert(users);
+    }
+
+    @Override
+    @Transactional
     public void markUserAsFraud(Long userId) {
         log.info("Marking userId={} as fraud", userId);
         jdbcTemplate.update(

@@ -17,5 +17,7 @@ public interface UserService {
 
     void bulkInsertEvents(List<Event> events);
 
+    void bulkInsertUsers(List<User> users);
+
     void markUserAsFraud(Long userId);
 }
